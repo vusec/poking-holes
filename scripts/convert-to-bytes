@@ -1,0 +1,19 @@
+#!/usr/bin/env ruby
+
+while l = $stdin.gets
+  md = /^(\d+\.\d+)([KM])B$/.match(l)
+  if md.nil?
+    raise "Couldn't parse #{l}"
+  end
+  v = md[1].to_f
+  mult = 0
+  case md[2]
+  when "K"
+    mult = 1024
+  when "M"
+    mult = 1024 * 1024
+  else
+    raise "Unknown multiplier: #{md[2]}"
+  end
+  puts("#{v * mult}")
+end

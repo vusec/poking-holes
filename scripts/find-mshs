@@ -1,0 +1,11 @@
+#!/bin/bash
+
+maps="$(dirname $0)/../maps"
+tmpfile="${HOME}/find-mshs.temp"
+
+for p in $*; do
+    $maps $p | grep -v 0x800000000000 | grep gap | grep -v GB >"$tmpfile"
+    cat <(grep KB "$tmpfile" | sort -g) <(grep MB "$tmpfile" | sort -g) | tail -n 1
+done
+
+rm "$tmpfile"

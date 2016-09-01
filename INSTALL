@@ -1,0 +1,6 @@
+The generic stub is a simple C program. You just need a C compiler,
+though GCC is assumed in the Makefile.
+
+The OCaml programs depend on the Jane Street core-extended
+library. You will need to install all the OPAM packages which provide
+the packages referenced in the Makefile (-pkg).

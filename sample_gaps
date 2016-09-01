@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# Sample the gaps, dump samples to files
+
+def dump(file, line)
+  md = /^gap: (.*)GB\s+0x(\h+)-0x(\h+)$/.match(line)
+  if md.nil?
+    raise "Couldn't parse '#{line}'"
+  end
+  low = md[2].to_i(16)
+  high = md[3].to_i(16)
+  file.puts("#{md[1]}\t#{low}\t#{high}")
+end
+
+files = ["first", "second", "third"].collect { |key|
+  f = File.open("#{key}_gap", "a")
+  f.puts("size\tlow\thigh")
+  f
+}
+
+count = 1
+while true
+  if (count % 1000) == 0
+    $stderr.print(".")
+  end
+  lines = `./maps | grep GB`.split("\n")
+  if lines.size != 3
+    raise "Got #{lines.size} (!= 3) lines from ./maps"
+  end
+  lines.each_index { |i|
+    dump(files[i], lines[i])
+  }
+  count += 1
+end

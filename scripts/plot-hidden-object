@@ -1,0 +1,27 @@
+#!/bin/sh
+
+plotscript="$(dirname $0)/common-plot"
+
+datadir=$1
+outdir=$2
+
+if test -z $datadir; then
+    echo "Need a data directory" 2>&1
+    exit 2
+fi
+
+if test -z $outdir; then
+    echo "Need an output directory" 2>&1
+    exit 2
+fi
+
+mkdir -p $outdir
+for hole in Large Small; do
+    $plotscript -d "$datadir" -r x.r -o "${outdir}/uncertainty${hole}_with_split_as_base.pdf" -V "uncertainty${hole}" -P split -R mshs -O 10485760,20971520,2101248,4194304,41943040,6291456,8388608
+    $plotscript -d "$datadir" -r x.r -o "${outdir}/uncertainty${hole}_with_mshs_as_base.pdf" -V "uncertainty${hole}" -P mshs -R split -O 4,6,8,10,12,14,16,20,24,28,32,48,64
+done
+
+for var in noperations nstates; do
+    $plotscript -d "$datadir" -r x.r -o "${outdir}/${var}_with_split_as_base.pdf" -V "$var" -P split -R mshs -O 10485760,20971520,2101248,4194304,41943040,6291456,8388608
+    $plotscript -d "$datadir" -r x.r -o "${outdir}/${var}_with_mshs_as_base.pdf" -V "$var" -P mshs -R split -O 4,6,8,10,12,14,16,20,24,28,32,48,64
+done

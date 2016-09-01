@@ -1,0 +1,75 @@
+#!/usr/bin/env ruby
+
+require 'erb'
+require 'fileutils'
+require 'optparse'
+
+$basedir = File.realpath(File.dirname(__FILE__))
+require "#{$basedir}/monparnes-common.rb"
+
+$monparnes = File.realpath "#{$basedir}/../monparnes.native"
+
+def pute(s)
+  $stderr.puts(s)
+end
+
+$options = {
+  :livedir => nil,
+  :outdir => nil,
+  :progressbar => false,
+  :parallel => true,
+}
+
+OptionParser.new { |opts|
+  opts.banner = "Usage: #{$0} [options]"
+  opts.on("-p", "--[no-]progress-bar", "Display progress bar") { |p|
+    $options[:progressbar] = p
+  }
+  opts.on("-l", "--live-directory=PATH", "Live (input) directory") { |p|
+    $options[:livedir] = p
+  }
+  opts.on("-o", "--output-directory=PATH", "Direct output to this directory") { |p|
+    $options[:outdir] = p
+  }
+  opts.on("-c", "--config=PATH", "Use config at PATH") { |p|
+    $options[:config] = p
+  }
+  opts.on("-j", "--[no-]parallel", "Output commands to be piped to GNU parallel") { |p|
+    $options[:parallel] = p
+  }
+}.parse!
+
+if $options[:livedir].nil?
+  pute("Need a live (input) directory")
+  exit(2)
+end
+
+if $options[:outdir].nil?
+  pute("Need an output directory")
+  exit(2)
+end
+
+if $options[:config].nil?
+  pute("Need a config file")
+  exit(2)
+end
+
+runs = Dir.glob("#{$options[:livedir]}/*")
+runs.keep_if { |x| File.directory?(x)}
+
+FileUtils.mkdir_p($options[:outdir])
+configfile = "#{$options[:outdir]}/config.sexp"
+FileUtils.cp("#{$options[:config]}", configfile)
+
+runner = Runner.new($options[:outdir], runs.size, $options[:progressbar], $options[:parallel])
+
+erb = "#{$monparnes} -C '#{configfile}' -l '#{$options[:livedir]}/<%= i %>/save' -r '<%= outdir %>/results' >\"<%= outdir %>/log\" 2>&1"
+cmd = ERB.new(erb)
+
+runs.each { |idir|
+  i = File.basename(idir)
+
+  runner.doit(i, cmd, "results", "log")
+}
+
+runner.done

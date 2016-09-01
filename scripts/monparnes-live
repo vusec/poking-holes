@@ -1,0 +1,76 @@
+#!/usr/bin/env ruby
+
+require 'erb'
+require 'fileutils'
+require 'optparse'
+
+$basedir = File.realpath(File.dirname(__FILE__))
+require "#{$basedir}/monparnes-common.rb"
+
+$monparnes = File.realpath "#{$basedir}/../monparnes.native"
+
+def pute(s)
+  $stderr.puts(s)
+end
+
+$options = {
+  :outdir => nil,
+  :num => nil,
+  :config => nil,
+  :shadow => true,
+  :progressbar => false,
+  :parallel => true,
+}
+
+OptionParser.new { |opts|
+  opts.banner = "Usage: #{$0} [options]"
+  opts.on("-p", "--[no-]progress-bar", "Display progress bar") { |p|
+    $options[:progressbar] = p
+  }
+  opts.on("-o", "--output-directory=PATH", "Direct output to this directory") { |p|
+    $options[:outdir] = p
+  }
+  opts.on("-n", "--num-runs=NUM", "Number of times to repeat test") { |n|
+    $options[:num] = n.to_i
+  }
+  opts.on("-c", "--config=PATH", "Use config at PATH") { |p|
+    $options[:config] = p
+  }
+  opts.on("-S", "--[no-]shadow", "Enable/disable shadow stub") { |s|
+    $options[:shadow] = s
+  }
+  opts.on("-j", "--[no-]parallel", "Output commands to be piped to GNU parallel") { |p|
+    $options[:parallel] = p
+  }
+}.parse!
+
+if $options[:outdir].nil?
+  pute("Need an output directory")
+  exit(2)
+end
+
+if $options[:num].nil?
+  pute("Need the number of times to run the test")
+  exit(2)
+end
+
+if $options[:config].nil?
+  pute("Need a config file")
+  exit(2)
+end
+
+runner = Runner.new($options[:outdir], $options[:num], $options[:progressbar], $options[:parallel])
+
+shadow = ""
+if not $options[:shadow]
+  shadow = "-noshadow"
+end
+erb = "#{$monparnes} #{shadow} -C '#{$options[:config]}' -r '<%= outdir %>/results' -s '<%= outdir %>/save' >\"<%= outdir%>/log\" 2>&1"
+cmd = ERB.new(erb)
+
+$options[:num].times { |i|
+  i += 1
+  runner.doit(i, cmd, "results", "log")
+}
+
+runner.done

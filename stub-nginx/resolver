@@ -1,0 +1,87 @@
+#!/usr/bin/env ruby
+
+$resolverlog = File.open("/dev/null", "w")
+$resolverlog.sync = true
+
+# offsetof(heap_info, size) in glibc/malloc/arena.c
+HEAP_INFO_NEXT_MALLOC_STATE_OFFSET = 0x888
+MMAP_MIN = 65536
+
+# offset of the main_arena static struct from the start of the libraries
+# in my self-compiled nginx binary
+MAIN_ARENA_OFFSET = 3814944
+
+# This is for the debian nginx binary (nginx-full 1.9.4-1)
+#MAIN_ARENA_OFFSET = 53360160
+
+def pute(s)
+  $stderr.puts(s)
+end
+
+if ARGV.size != 2
+  pute("Expected exactly two arguments")
+  exit(2)
+end
+
+pid = ARGV.shift
+pid = pid.to_i
+
+hole_size = ARGV.shift
+hole_size = hole_size.to_i
+
+$resolverlog.puts("using #{pid} #{hole_size}")
+
+#
+# +-----------+------------------+-----------+-----+-----------+
+# |           |                  |           |     |           |
+# |  hole A   |  heap_info [...] | PROT_NONE | gap | libraries |
+# |           |                  |           |     |           |
+# +-----------+------------------+-----------+-----+-----------+
+# Hole A starts at MMAP_MIN. heap_info is a glibc struct, at a fixed
+# offset from which (it's really heap_info->ar_ptr->next, but for
+# this particular heap_info, ->ar_ptr->next is at a fixed offset from
+# the start of the struct, namely HEAP_INFO_NEXT_MALLOC_STATE_OFFSET)
+# we find a pointer to the static variable 'main_arena'. For any
+# given binary, main_arena will be at a fixed offset from mmap_base.
+# For the same reason, it will be at a fixed offset from the lowest library,
+# i.e. MAIN_ARENA_OFFSET and this is what our parent process will
+# want to check.
+
+next_ptr_addr = hole_size + MMAP_MIN + HEAP_INFO_NEXT_MALLOC_STATE_OFFSET
+
+cmd = "gdb /proc/#{pid}/exe #{pid}"
+$resolverlog.puts("EXEC: '#{cmd}'")
+begin
+  IO.popen(cmd, "r+"){ |p|
+    $resolverlog.puts("talking to gdb")
+    p.puts("print \"syncpoint\"")
+    p.puts("x/xg #{next_ptr_addr}")
+    while true
+      l = p.gets
+      $resolverlog.puts("GDB: '#{l}'")
+      if /.*syncpoint.*/.match(l)
+        break
+      end
+    end
+    line = p.gets
+    $resolverlog.puts("gdb says: #{line}")
+    # 0x7ffffe91bed8: 0x00007fc92a2351f0
+    md = /^\(gdb\)\s+(0x\h+):\s+(0x\h+)/.match(line)
+    if md.nil?
+      pute("Could not parse '#{line}'")
+      exit(3)
+    end
+    addr = md[1].to_i(16)
+    if addr != next_ptr_addr
+      pute("Read at #{next_ptr_addr} but gdb thought #{addr}")
+      exit(3)
+    end
+    next_ptr = md[2].to_i(16)
+    $resolverlog.puts("next_ptr: #{next_ptr}")
+    printf("%d", next_ptr - MAIN_ARENA_OFFSET - MMAP_MIN)
+    p.puts("quit")
+  }
+rescue Exception => e
+  $resolverlog.puts("Exception: #{e} (#{e.class})")
+end
+$resolverlog.puts("Exiting")

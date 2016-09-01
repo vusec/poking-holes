@@ -1,0 +1,283 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require 'fileutils'
+
+$ourbase = File.realpath(File.dirname(__FILE__))
+$py_getpool = "#{$ourbase}/getPoolSize.py"
+$py_setpool = "#{$ourbase}/setPoolSize.py"
+
+$nginx_port = 8047
+
+$options = {
+  :debug => true
+}
+
+def putd(s)
+ $options[:debug] and $stderr.puts(s)
+end
+
+def pute(s)
+  $stderr.puts(s)
+end
+
+def success(s)
+  puts("OK\n#{s}")
+end
+
+def failure(s)
+  puts("ERR\n#{s}")
+end
+
+class Stub
+  def initialize
+    prefix = ""
+    if not $options[:nginxprefix].nil?
+      prefix = "-p '#{$options[:nginxprefix]}'"
+    end
+    cmd = "'#{$options[:nginx]}' #{prefix} -g 'error_log error.log;' -c 'nginx.conf'"
+    putd("EXEC: #{cmd}")
+    Process.spawn(cmd)
+    # Wait for nginx to startup
+    # XXX: we should be GETing something in a loop!
+    sleep(5)
+    @master_pid = IO.readlines("#{$options[:nginxprefix]}/nginx.pid")[0].to_i
+    childpath = "/proc/#{@master_pid}/task/#{@master_pid}/children"
+    File.open(childpath, "r") { |f|
+      putd("childpath = #{childpath}")
+      children = f.read(1024)
+      children = children.split(" ")
+      if children.size != 1
+        raise "Nginx has #{children.size} worker processes"
+      end
+      @pid = children[0].to_i
+    }
+    putd("Using [nginx master] = #{@master_pid}, [worker] = #{@pid}")
+
+    init_pool_size, init_pool_addr = get_pool_size
+    @pool_size_addr = init_pool_addr
+
+    putd("Initial pool size is #{init_pool_size}, addr is #{@pool_size_addr}")
+
+    if @pool_size_addr.nil?
+      raise "@pool_size_addr not set!"
+    end
+  end
+
+  def pid
+    "#{@pid}"
+  end
+
+  def getpoolsize
+    pool_size, addr = get_pool_size
+    "#{pool_size}"
+  end
+
+  def setpoolsize(size)
+    cmd = "gdb '#{$options[:nginx]}' #{@pid}"
+
+    IO.popen(cmd, "r+") { |p|
+      p.puts("source #{$py_setpool}")
+      p.puts("set-pool-size #{@pool_size_addr} #{size}")
+
+      wait_for_gdb(p)
+      p.puts("quit")
+    }
+  end
+
+  def alloc(size)
+    cmd = "gdb '#{$options[:nginx]}' #{@pid}"
+
+    IO.popen(cmd, "r+") { |p|
+      wait_for_gdb(p)
+      # PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE
+      mmap = "print/x mmap(0, #{size}, 0x3, 0x4022, -1, 0)"
+      p.puts(mmap)
+      line = p.gets
+
+      wait_for_gdb(p)
+      p.puts("quit")
+
+      # AWFUL HACK. Since we can't get gdb not to truncate the address,
+      # decide on whether the allocation was a success or not based on
+      # the low bits (mmap addresses are page-aligned). This is only
+      # just enough for the final filling of the recovered hole in
+      # dissect.ml. We hard code the return address (which needs to be
+      # numeric) to 1.
+      if /ff$/.match(line)
+        return failure("Failed")
+      else
+        return success("1 TBD")
+      end
+    }
+  end
+
+  def talloc(size)
+    if (size % 4096) != 0
+      raise "Size (#{size}) not a multiple of the page size"
+    end
+    if size < 4096
+      raise "Haven't looked into handling allocation sizes < 4096"
+    end
+    # The code path we trigger uses posix_memalign/memalign with an
+    # alignment of 16, which our allocation always has, BUT those
+    # functions will add 4096 anyway
+    size -= 4096
+    setpoolsize(size)
+    IO.popen("curl -v -o /dev/null -w '%{http_code}' http://127.0.0.1:#{$nginx_port}") { |p|
+      line = p.gets
+      if line == "000"
+        failure("Couldn't allocate")
+      else
+        success("Allocated")
+      end
+    }
+  end
+
+  def mmap_fixed(addr, size)
+    cmd = "gdb '#{$options[:nginx]}' #{@pid}"
+
+    IO.popen(cmd, "r+") { |p|
+      wait_for_gdb(p)
+      # PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_FIXED|MAP_PRIVATE|MAP_NORESERVE
+      mmap = "print/x mmap(#{addr}, #{size}, 0x3, 0x4032, -1, 0)"
+      p.puts(mmap)
+      line = p.gets
+      # OH MY GODS CAN'T GET GDB TO PRINT THE RESULT OF
+      # MMAP W/O TRUNCATING IT TO 32 BITS SO WE HAVE TO
+      # REPRODUCE IT HERE AND ONLY MATCH THE LOW 32 BITS.
+      # CAN WE HAVE AN EXCORCISM PLEASE KTHX
+      addrstr = sprintf("%x", addr)
+      if addrstr.size > 8
+        addrstr = addrstr[-8..-1]
+      end
+      re = Regexp.new("#{addrstr}$")
+      md = re.match(line)
+      if md.nil?
+        raise "mmap_fixed failed! (#{line}) (used: #{mmap})"
+      end
+      wait_for_gdb(p)
+      p.puts("quit")
+    }
+    "Allocated"
+  end
+
+  def maps
+   `cat /proc/#{@pid}/maps`
+  end
+
+  def stop
+    Process.kill("TERM", @master_pid)
+  end
+private
+  def wait_for_gdb(p)
+    p.puts("print \"OMG GDB IS DONE\"")
+    while true
+      l = p.gets # wait for the magic line to make sure the breakpoint is set
+      next unless /OMG GDB IS DONE/.match(l)
+      break
+    end
+  end
+
+  def get_pool_size
+    cmd = "gdb '#{$options[:nginx]}' #{@pid}"
+    p = IO.popen(cmd, "r+")
+    p.puts("source #{$py_getpool}")
+    wait_for_gdb(p)
+    p.puts("continue")
+    system("curl -s -o /dev/null http://127.0.0.1:#{$nginx_port}")
+    p.puts("quit")
+
+    lines = p.readlines
+
+    p.close
+
+    lines.each { |l|
+      md = /pool_size (\d+) @ (\S+)/.match(l)
+      next unless md
+      return [md[1], md[2].to_i(16)]
+    }
+    return [nil, nil]
+  end
+
+end
+
+OptionParser.new { |opts|
+  opts.on("-e", "--executable=PATH", "PATH to nginx executable") { |p|
+    $options[:nginx] = p
+  }
+  opts.on("-c", "--nginx-conf=PATH", "PATH to nginx configuration") { |p|
+    $options[:nginxconf] = p
+  }
+  opts.on("-p", "--nginx-prefix=PATH", "PATH to use with nginx -p") { |p|
+    $options[:nginxprefix] = p
+  }
+}.parse!
+
+if $options[:nginx].nil?
+  pute("Need the path to the nginx executable")
+  exit(2)
+end
+
+if $options[:nginxconf].nil?
+  pute("Need the path to the nginx configuration file")
+  exit(2)
+end
+
+if not $options[:nginxprefix].nil?
+  FileUtils.mkdir_p($options[:nginxprefix])
+end
+
+FileUtils.cp($options[:nginxconf], "#{$options[:nginxprefix]}/nginx.conf")
+
+$stdout.sync = true
+
+stub = Stub.new
+
+begin
+  while true
+    line = $stdin.gets
+    fields = line.split(" ")
+    cmd = fields[0]
+    args = fields[1..-1]
+    case cmd
+    when "setpoolsize"
+      if args.size != 1
+        raise "Expected exactly one argument"
+      end
+      success(stub.setpoolsize(args[0].to_i(10)))
+    when "pid"
+      success(stub.pid)
+    when "getpoolsize"
+      success(stub.getpoolsize)
+    when "maps"
+      success(stub.maps)
+    when "mmap_fixed"
+      if args.size != 2
+        raise "Expected exactly two arguments"
+      end
+      addr = args[0].to_i(16)
+      size = args[1].to_i
+      success(stub.mmap_fixed(addr, size))
+    when "talloc"
+      stub.talloc(args[0].to_i(10))
+    when "alloc"
+      stub.alloc(args[0].to_i(10))
+    when "quit"
+      break
+    else
+      raise "Unknown command: #{cmd}"
+    end
+  end
+rescue Exception => e
+  pute("Exception: #{e} #{e.backtrace.join("\n")}")
+ensure
+  begin
+    # If the stderr pipe is closed on the other end, printing
+    # out this message will also raise an exception, make
+    # sure we'll stop the stub no matter what.
+    pute("Reaping nginx")
+  ensure
+    stub.stop
+  end
+end

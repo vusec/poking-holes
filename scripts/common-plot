@@ -1,0 +1,275 @@
+#!/usr/bin/env ruby
+
+require 'erb'
+require 'csv'
+require 'optparse'
+require 'tempfile'
+
+$basedir = File.realpath(File.dirname(__FILE__))
+require "#{$basedir}/../fmtsize.rb"
+
+def pute(s)
+  $stderr.puts(s)
+end
+
+def putd(s)
+  if $options[:debug]
+    $stderr.puts(s)
+  end
+end
+
+$options = {
+  :debug => false,
+  :summaries => ["median"],
+}
+
+class ParameterTuple
+  def initialize(dirpath, params)
+    @dirpath = dirpath
+    @params = params
+  end
+  def get_param(name)
+    @params[name]
+  end
+  def self.open(path)
+    basename = File.basename(path)
+    md = /^split_(\d+)_mshs_(\d+)$/.match(basename)
+    raise "Couldn't parse #{basename}" unless md
+    split = md[1].to_i
+    mshs = md[2].to_i
+    hsh = {"split" => split, "mshs" => mshs}
+    ParameterTuple.new(path, hsh)
+
+  end
+  def get_values(var)
+    values = []
+    tsvpath = "#{@dirpath}/stats.tsv"
+    File.open(tsvpath, "r") { |f|
+      csv = CSV.new(f, :col_sep => "\t",
+                    :headers => true,
+                    :return_headers => true,
+                    :converters => :numeric,
+                   )
+      idx = nil
+      csv.each { |row|
+        if idx.nil?
+          idx = row.index(var)
+          if idx.nil?
+            raise "No such var (#{var}) in #{tsvpath}"
+          end
+          next
+        end
+        values << row[idx]
+      }
+    }
+    values
+  end
+
+  def percentile(var, pct)
+      values = get_values(var)
+      sum = 0
+      values.sort!
+      i = (pct * values.size) / 100
+      if ((pct * values.size) % 100) == 0
+        (values[i] + values[i - 1]) / 2
+      else
+        values[i]
+      end
+  end
+  def summary(type, var)
+    case type
+    when "median"
+      percentile(var, 50)
+    when "50pct"
+      percentile(var, 50)
+    when "90pct"
+      percentile(var, 90)
+    else
+      raise "Unknown summary: #{type}"
+    end
+  end
+  def to_s
+    "#{@params}"
+  end
+end
+
+def get_tuples(dirpath)
+  tuples = []
+  Dir.new(dirpath).each { |entry|
+    next if entry == "." or entry == ".."
+    path = "#{dirpath}/#{entry}"
+    next unless File::Stat.new(path).directory?
+    tuples << ParameterTuple.open(path)
+  }
+  tuples
+end
+
+class NamedVector
+  attr_reader :name, :values
+  def initialize(name, values)
+    @name = name
+    @values = values
+  end
+  def dump(out)
+    out.print("#{@name} = c(")
+    out.puts(@values.collect { |v| v.to_s}.join(", "))
+    out.puts(")")
+  end
+end
+
+def dump_vec(out, name, vec)
+  out.print("#{name} = c(")
+  out.puts(vec.collect { |v| v.to_s}.join(", "))
+  out.puts(")")
+end
+
+OptionParser.new { |opts|
+  opts.banner = "Usage: #{$0} [options]"
+  opts.on("-D", "--debug", "Emit debug output") { |d|
+    $options[:debug] = d
+  }
+  opts.on("-d", "--directory=PATH", "Directory to read") { |p|
+    $options[:directory] = p
+  }
+  opts.on("-V", "--variable=NAME", "Variable to plot on the Y axis") { |s|
+    $options[:varname] = s
+  }
+  opts.on("-P", "--base-param=NAME", "Parameter on the X axis") { |s|
+    $options[:baseparam] = s
+  }
+  opts.on("-R", "--other-param=NAME", "Other parameter") { |s|
+    $options[:otherparam] = s
+  }
+  opts.on("-O", "--other-param-values=val1,val2,...", "Select values of the non-base param") { |x|
+    $options[:other_values] = x.split(",").collect { |n| n.to_i }
+  }
+  opts.on("-o", "--output=PATH", "Output file") { |p|
+    $options[:outfile] = p
+  }
+  opts.on("-r", "--rfile=PATH", "Save R script") { |p|
+    $options[:rscript] = p
+  }
+  opts.on("-s", "--summary=sum1,sum2,...", "Which distribution summaries (median, avg) to plot") { |sums|
+    $options[:summaries] = sums.split(",")
+  }
+}.parse!
+
+if ARGV.size > 0
+  pute("Stray arguments: #{ARGV}")
+  exit(2)
+end
+
+if $options[:directory].nil?
+  pute("Need a directory")
+  exit(2)
+end
+
+if $options[:varname].nil?
+  pute("Need a variable to plot")
+  exit(2)
+end
+
+if $options[:other_values].nil?
+  pute("Need the relevant values of the other param")
+  exit(2)
+end
+
+tuples = get_tuples($options[:directory])
+
+baseparam = $options[:baseparam]
+otherparam = $options[:otherparam]
+varname = $options[:varname]
+
+out = Tempfile.new("Rplotter", ".")
+if $options[:rscript]
+  out = File.open($options[:rscript], "w")
+end
+
+begin
+  out.puts(<<EOF
+library(ggplot2)
+library(reshape2)
+theme_bw(base_size = 11)
+EOF
+          )
+
+  out.puts("print('Starting up')")
+  out.puts("flush.console()")
+
+  vectors = []
+  $options[:other_values].each { |other_val|
+    tuples.sort! { |a, b| a.get_param(baseparam) <=> b.get_param(baseparam)}
+    base_values = []
+    summary_values = []
+    tuples.each { |tup|
+      op = tup.get_param(otherparam)
+      next unless op == other_val
+      base_values << tup.get_param(baseparam)
+      # User might be asking us to plot e.g. median and 90th-percentile
+      # for the same data
+      summaries = $options[:summaries].collect { |summary|
+        tup.summary(summary, varname)
+      }
+      summary_values << summaries
+    }
+    vec1 = NamedVector.new("#{baseparam}", base_values)
+    y_vectors = $options[:summaries].zip(summary_values.transpose).collect { |x|
+      summary = x[0]
+      y_values = x[1]
+      NamedVector.new("#{varname}_#{summary}_#{otherparam}_#{other_val}", y_values)
+    }
+    if vectors.size > 0
+      y_vectors.each { |vec|
+        vec.dump(out)
+      }
+      vectors.concat(y_vectors)
+      if not (vec1.values == vectors[0].values)
+        raise "vec1 and vector[0] differ"
+      end
+    else
+      vec1.dump(out)
+      y_vectors.each { |vec|
+        vec.dump(out)
+      }
+      vectors << vec1
+      vectors.concat(y_vectors)
+    end
+  }
+  vecstr = vectors.collect { |vec| vec.name }.join(", ")
+  out.puts("print('about to build data')")
+  out.puts("flush.console()")
+  out.puts("frame = data.frame(#{vecstr})")
+  out.puts("print(frame)")
+  out.puts("print('about to melt data')")
+  out.puts("flush.console()")
+  out.puts("melted = melt(frame, id.vars=\"#{vectors[0].name}\")")
+  out.puts("print(melted)")
+  out.puts("flush.console()")
+  out.puts("p <- ggplot(data=melted, aes(x=#{vectors[0].name}, y=value, group=variable, linetype=variable, color=variable))")
+  xbreaks = "c(#{vectors[0].values.join(", ")})"
+  formated_labels = vectors[0].values.collect { |v|
+    # crude hack; split is always small, mshs is always large
+    if v < 1024
+      "\"#{v}\""
+    else
+      "\"#{fmtsz(v, :padding => 0, :decimal_points => 0, :binary_units => true)}\""
+    end
+  }
+  xlabels = "c(#{formated_labels.join(",")})"
+  out.puts("p <- p + geom_line() + scale_x_discrete(breaks=#{xbreaks}, labels=#{xlabels})")
+  out.puts("p <- p + theme(axis.text.x = element_text(angle=90))")
+#  out.puts("p <- p + scale_y_log10()")
+  out.puts("out = \"#{$options[:outfile]}\"")
+  out.puts("ggsave(out)")
+  out.puts("q(status = 0)")
+
+  out.flush
+  out.close
+  cmd = "Rscript #{out.path}"
+  putd("Executing #{cmd}")
+  system(cmd)
+ensure
+  if not $options[:rscript]
+    out.unlink
+  end
+end

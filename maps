@@ -1,0 +1,131 @@
+#!/usr/bin/env ruby
+
+require 'rainbow/ext/string'
+require 'optparse'
+
+require "#{File.dirname(__FILE__)}/fmtsize.rb"
+
+$options = {
+  :gaps => false,
+}
+
+def putd(s)
+  $stderr.puts(s)
+end
+
+def pute(s)
+  $stderr.puts(s)
+end
+
+$proc_pid_maps_re = /^(\h+)-(\h+)\s(\S+)\s\S+\s\S+\s\S+\s+(.*)$/
+class Vma
+  @@userspace_limit = 0x7fffffffffff
+  attr_reader :low, :high, :flags, :path
+  def initialize(low, high, flags, path)
+    @low = low
+    @high = high
+    if @low < @@userspace_limit and @high > @@userspace_limit
+      @high = @@userspace_limit + 1
+    end
+    @flags = flags
+    @path = path
+  end
+  def self.of_line(line)
+    md = $proc_pid_maps_re.match(line)
+    if md.nil?
+      raise "Couldn't parse #{line}"
+    end
+    low = md[1].to_i(16)
+    high = md[2].to_i(16)
+    flags = md[3]
+    path = nil
+    if md[4] != ""
+      path = md[4]
+    end
+    map = Vma.new(low, high, flags, path)
+    map
+  end
+  def to_s
+    s = "#{fmtsz(size, :padding => 18)}#{sprintf("%#20x", @low)} #{sprintf("%#20x", @high)}\t#{flags}\t#{path}"
+    if flags == :gap
+      if size > (1024 * 1024 * 1024)
+        s.color(:red)
+      else
+        s.color(:yellow)
+      end
+    else
+      s
+    end
+  end
+  def size
+    @high - @low
+  end
+end
+
+class Maps
+  def initialize(str)
+    lines = str.split("\n")
+    @maps = lines.collect { |l|
+      Vma.of_line(l)
+    }
+    find_gaps
+  end
+  def self.of_path(path)
+    File.open(path, "r") { |f|
+      str = f.read(100000000)
+      return Maps.new(str)
+    }
+  end
+  def to_s
+    @maps.collect { |m|
+      m.to_s
+    }.join("\n")
+  end
+  def print_gaps
+    gaps.each { |gap|
+      puts(gap)
+    }
+  end
+private
+  def gaps
+    @maps.select { |vma|
+      vma.flags == :gap
+    }
+  end
+  def find_gaps
+    last_high = 0
+    gaps = []
+    @maps.each { |map|
+      if last_high != map.low
+        low = last_high
+        high = map.low
+        gap = Vma.new(low, high, :gap, nil)
+        gaps << gap
+      end
+      last_high = map.high
+    }
+    @maps.concat(gaps)
+    @maps.sort_by! { |map|
+      map.low
+    }
+  end
+end
+
+OptionParser.new { |opts|
+  opts.banner = "Usage: #{$0} [options]"
+  opts.on("-g", "--gaps", "Show gaps") { |g|
+    $options[:gaps] = g
+  }
+  opts.on("-c", "--[no-]color", "Force colors on or off") { |c|
+    Sickill::Rainbow.enabled = c
+  }
+}.parse!
+
+if ARGV.size != 1
+  pute("Need exactly one file argument")
+  exit(2)
+end
+
+path = ARGV.shift
+maps = Maps.of_path(path)
+puts(maps)

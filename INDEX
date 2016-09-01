@@ -1,0 +1,6 @@
+gdb/ -- GDB commands for semi-automated exploration of pointers between objects
+dissect-configs/ -- sample configuration files for the dissect (EAP-only) attack
+monparnes-configs/ -- sample configuration files for the PAP-only attack
+scripts/ -- various utility scripts
+stub-nginx/ -- implementation of the nginx allocation stub
+*.ml *.mli -- implementation of the attacks and result postprocessing code
